@@ -1,15 +1,13 @@
 use futures::task::Context;
-use libp2p::{
-    core::{connection::ConnectionId, ConnectedPoint},
-    swarm::{
-        protocols_handler::DummyProtocolsHandler, NetworkBehaviour, NetworkBehaviourAction,
-        PollParameters,
-    },
-    Multiaddr, PeerId,
-};
-use std::{collections::VecDeque, task::Poll};
+use libp2p::core::connection::ConnectionId;
+use libp2p::core::ConnectedPoint;
+use libp2p::swarm::protocols_handler::DummyProtocolsHandler;
+use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, PollParameters};
+use libp2p::{Multiaddr, PeerId};
+use std::collections::{HashMap, VecDeque};
+use std::task::Poll;
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum OutEvent {
     ConnectionEstablished(PeerId),
 }
@@ -19,30 +17,46 @@ pub enum OutEvent {
 /// peers we only ever connect to a single counterparty. Peer Tracker tracks
 /// that connection.
 #[derive(Default, Debug)]
-pub struct PeerTracker {
+pub struct Behaviour {
     connected: Option<(PeerId, Multiaddr)>,
+    address_of_peer: HashMap<PeerId, Multiaddr>,
     events: VecDeque<OutEvent>,
 }
 
-impl PeerTracker {
+impl Behaviour {
+    /// Return whether we are connected to the given peer.
+    pub fn is_connected(&self, peer_id: &PeerId) -> bool {
+        if let Some((connected_peer_id, _)) = &self.connected {
+            if connected_peer_id == peer_id {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Returns the peer id of counterparty if we are connected.
     pub fn counterparty_peer_id(&self) -> Option<PeerId> {
         if let Some((id, _)) = &self.connected {
-            return Some(id.clone());
+            return Some(*id);
         }
         None
     }
 
-    /// Returns the multiaddr of counterparty if we are connected.
-    pub fn counterparty_addr(&self) -> Option<Multiaddr> {
-        if let Some((_, addr)) = &self.connected {
-            return Some(addr.clone());
+    /// Returns the peer_id and multiaddr of counterparty if we are connected.
+    pub fn counterparty(&self) -> Option<(PeerId, Multiaddr)> {
+        if let Some((peer_id, addr)) = &self.connected {
+            return Some((*peer_id, addr.clone()));
         }
         None
+    }
+
+    /// Add an address for a given peer. We only store one address per peer.
+    pub fn add_address(&mut self, peer_id: PeerId, address: Multiaddr) {
+        self.address_of_peer.insert(peer_id, address);
     }
 }
 
-impl NetworkBehaviour for PeerTracker {
+impl NetworkBehaviour for Behaviour {
     type ProtocolsHandler = DummyProtocolsHandler;
     type OutEvent = OutEvent;
 
@@ -50,11 +64,17 @@ impl NetworkBehaviour for PeerTracker {
         DummyProtocolsHandler::default()
     }
 
-    fn addresses_of_peer(&mut self, _: &PeerId) -> Vec<Multiaddr> {
+    fn addresses_of_peer(&mut self, peer_id: &PeerId) -> Vec<Multiaddr> {
         let mut addresses: Vec<Multiaddr> = vec![];
 
-        if let Some(addr) = self.counterparty_addr() {
-            addresses.push(addr)
+        if let Some((counterparty_peer_id, addr)) = self.counterparty() {
+            if counterparty_peer_id == *peer_id {
+                addresses.push(addr)
+            }
+        }
+
+        if let Some(addr) = self.address_of_peer.get(peer_id) {
+            addresses.push(addr.clone());
         }
 
         addresses
@@ -72,18 +92,18 @@ impl NetworkBehaviour for PeerTracker {
     ) {
         match point {
             ConnectedPoint::Dialer { address } => {
-                self.connected = Some((peer.clone(), address.clone()));
+                self.connected = Some((*peer, address.clone()));
             }
             ConnectedPoint::Listener {
                 local_addr: _,
                 send_back_addr,
             } => {
-                self.connected = Some((peer.clone(), send_back_addr.clone()));
+                self.connected = Some((*peer, send_back_addr.clone()));
             }
         }
 
         self.events
-            .push_back(OutEvent::ConnectionEstablished(peer.clone()));
+            .push_back(OutEvent::ConnectionEstablished(*peer));
     }
 
     fn inject_connection_closed(&mut self, _: &PeerId, _: &ConnectionId, _: &ConnectedPoint) {

@@ -1,118 +1,72 @@
 use async_trait::async_trait;
 use futures::prelude::*;
-use libp2p::{
-    core::upgrade,
-    request_response::{ProtocolName, RequestResponseCodec},
-};
-use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, io, marker::PhantomData};
-use tracing::debug;
-
-use crate::SwapAmounts;
-use xmr_btc::{alice, bob, monero};
+use libp2p::core::upgrade;
+use libp2p::core::upgrade::ReadOneError;
+use libp2p::request_response::{ProtocolName, RequestResponseCodec};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::fmt::Debug;
+use std::io;
+use std::marker::PhantomData;
 
 /// Time to wait for a response back once we send a request.
 pub const TIMEOUT: u64 = 3600; // One hour.
 
 /// Message receive buffer.
-const BUF_SIZE: usize = 1024 * 1024;
-
-// TODO: Think about whether there is a better way to do this, e.g., separate
-// Codec for each Message and a macro that implements them.
-
-/// Messages Bob sends to Alice.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum BobToAlice {
-    #[serde(with = "::bitcoin::util::amount::serde::as_sat")]
-    AmountsFromBtc(::bitcoin::Amount),
-    AmountsFromXmr(monero::Amount),
-    Message0(bob::Message0),
-    Message1(bob::Message1),
-    Message2(bob::Message2),
-    Message3(bob::Message3),
-}
-
-/// Messages Alice sends to Bob.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum AliceToBob {
-    Amounts(SwapAmounts),
-    Message0(alice::Message0),
-    Message1(alice::Message1),
-    Message2, // empty response
-    Message3, // empty response
-}
+pub const BUF_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct AmountsProtocol;
+pub struct TransferProofProtocol;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Message0Protocol;
+pub struct EncryptedSignatureProtocol;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Message1Protocol;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Message2Protocol;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Message3Protocol;
-
-impl ProtocolName for AmountsProtocol {
+impl ProtocolName for TransferProofProtocol {
     fn protocol_name(&self) -> &[u8] {
-        b"/xmr/btc/amounts/1.0.0"
+        b"/comit/xmr/btc/transfer_proof/1.0.0"
     }
 }
 
-impl ProtocolName for Message0Protocol {
+impl ProtocolName for EncryptedSignatureProtocol {
     fn protocol_name(&self) -> &[u8] {
-        b"/xmr/btc/message0/1.0.0"
+        b"/comit/xmr/btc/encrypted_signature/1.0.0"
     }
 }
 
-impl ProtocolName for Message1Protocol {
-    fn protocol_name(&self) -> &[u8] {
-        b"/xmr/btc/message1/1.0.0"
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct CborCodec<P, Req, Res> {
+    phantom: PhantomData<(P, Req, Res)>,
 }
 
-impl ProtocolName for Message2Protocol {
-    fn protocol_name(&self) -> &[u8] {
-        b"/xmr/btc/message2/1.0.0"
+impl<P, Req, Res> Default for CborCodec<P, Req, Res> {
+    fn default() -> Self {
+        Self {
+            phantom: PhantomData::default(),
+        }
     }
-}
-
-impl ProtocolName for Message3Protocol {
-    fn protocol_name(&self) -> &[u8] {
-        b"/xmr/btc/message3/1.0.0"
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Codec<P> {
-    phantom: PhantomData<P>,
 }
 
 #[async_trait]
-impl<P> RequestResponseCodec for Codec<P>
+impl<P, Req, Res> RequestResponseCodec for CborCodec<P, Req, Res>
 where
-    P: Send + Sync + Clone + ProtocolName,
+    P: ProtocolName + Send + Sync + Clone,
+    Req: DeserializeOwned + Serialize + Send,
+    Res: DeserializeOwned + Serialize + Send,
 {
     type Protocol = P;
-    type Request = BobToAlice;
-    type Response = AliceToBob;
+    type Request = Req;
+    type Response = Res;
 
     async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
-        debug!("enter read_request");
-        let message = upgrade::read_one(io, BUF_SIZE)
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let message = upgrade::read_one(io, BUF_SIZE).await.map_err(|e| match e {
+            ReadOneError::Io(err) => err,
+            e => io::Error::new(io::ErrorKind::Other, e),
+        })?;
         let mut de = serde_cbor::Deserializer::from_slice(&message);
-        let msg = BobToAlice::deserialize(&mut de).map_err(|e| {
+        let msg = Req::deserialize(&mut de).map_err(|e| {
             tracing::debug!("serde read_request error: {:?}", e);
             io::Error::new(io::ErrorKind::Other, e)
         })?;
@@ -128,12 +82,11 @@ where
     where
         T: AsyncRead + Unpin + Send,
     {
-        debug!("enter read_response");
         let message = upgrade::read_one(io, BUF_SIZE)
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut de = serde_cbor::Deserializer::from_slice(&message);
-        let msg = AliceToBob::deserialize(&mut de).map_err(|e| {
+        let msg = Res::deserialize(&mut de).map_err(|e| {
             tracing::debug!("serde read_response error: {:?}", e);
             io::Error::new(io::ErrorKind::InvalidData, e)
         })?;
@@ -167,9 +120,8 @@ where
     where
         T: AsyncWrite + Unpin + Send,
     {
-        debug!("enter write_response");
         let bytes = serde_cbor::to_vec(&res).map_err(|e| {
-            tracing::debug!("serde write_reponse error: {:?}", e);
+            tracing::debug!("serde write_response error: {:?}", e);
             io::Error::new(io::ErrorKind::InvalidData, e)
         })?;
         upgrade::write_one(io, &bytes).await?;

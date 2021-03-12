@@ -1,12 +1,15 @@
-use futures::prelude::*;
+pub mod peer_tracker;
+pub mod quote;
+pub mod request_response;
+pub mod spot_price;
+pub mod transport;
+
 use libp2p::core::Executor;
+use std::future::Future;
 use std::pin::Pin;
 use tokio::runtime::Handle;
 
-pub mod peer_tracker;
-pub mod request_response;
-pub mod transport;
-
+#[allow(missing_debug_implementations)]
 pub struct TokioExecutor {
     pub handle: Handle,
 }
