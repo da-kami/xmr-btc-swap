@@ -63,6 +63,8 @@ jobs:
           sudo apt-get install gcc-arm-linux-gnueabihf
 
       - name: Build binary
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: |
           cargo build -p swap --target ${{ matrix.target }}
 
@@ -104,6 +106,8 @@ jobs:
           sudo apt-get install gcc-arm-linux-gnueabihf
 
       - name: Build tests
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
         run: cargo build --tests --workspace --all-features
 
       - name: Run monero-harness tests
